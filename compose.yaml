@@ -1,7 +1,7 @@
 services:
 
   app:
-    image: neelima4/jenkins-docker-cicd:latest
+    image: ${APP_IMAGE}
     ports:
       - "8081:8080"
 
@@ -10,7 +10,7 @@ services:
         condition: service_healthy
 
     environment:
-      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/appdb
+      SPRING_DATASOURCE_URL: jdbc:postgresql://wrong-postgres:5432/appdb
       SPRING_DATASOURCE_USERNAME: appuser
       SPRING_DATASOURCE_PASSWORD: apppass
 
