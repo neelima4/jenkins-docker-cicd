@@ -63,14 +63,28 @@ pipeline {
         }
 
         stage('Verify Deployment') {
-            steps {
-                sh '''
-                    sleep 10
-                    docker compose ps
-                    curl --fail http://localhost:8081
-                '''
-            }
-        }
+ 	 steps {
+        	sh '''
+            echo "Waiting for application to start..."
+
+            for i in $(seq 1 12); do
+                if curl --fail --silent http://localhost:8081 > /dev/null; then
+                    echo "Application is healthy"
+                    curl http://localhost:8081
+                    exit 0
+                fi
+
+                echo "Application not ready yet. Attempt $i/12"
+                sleep 5
+            done
+
+            echo "Application failed to become ready"
+            docker compose ps
+            docker compose logs app
+            exit 1
+        '''
+    }
+}
 
         stage('Cleanup') {
             steps {
