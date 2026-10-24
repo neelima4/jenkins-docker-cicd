@@ -55,12 +55,13 @@ pipeline {
         stage('Deploy New Version') {
             steps {
                 sh '''
-                    echo "Deploying version ${BUILD_NUMBER}"
+                    echo "Deploying build ${BUILD_NUMBER}"
 
                     APP_IMAGE=$DOCKER_IMAGE:${BUILD_NUMBER} \
                         docker compose pull app
 
-                    docker compose down
+                    APP_IMAGE=$DOCKER_IMAGE:${BUILD_NUMBER} \
+                        docker compose down
 
                     APP_IMAGE=$DOCKER_IMAGE:${BUILD_NUMBER} \
                         docker compose up -d
@@ -71,7 +72,7 @@ pipeline {
         stage('Verify Deployment') {
             steps {
                 sh '''
-                    echo "Waiting for application..."
+                    echo "Waiting for application health check..."
 
                     for i in $(seq 1 12); do
 
@@ -80,7 +81,11 @@ pipeline {
                             | grep -q '"status":"UP"'; then
 
                             echo "Application is healthy"
-                            curl http://localhost:8081/actuator/health
+                            echo "Build ${BUILD_NUMBER} deployed successfully"
+
+                            APP_IMAGE=$DOCKER_IMAGE:${BUILD_NUMBER} \
+                                docker compose ps
+
                             exit 0
                         fi
 
@@ -90,8 +95,11 @@ pipeline {
 
                     echo "Deployment failed health check"
 
-                    docker compose ps
-                    docker compose logs app
+                    APP_IMAGE=$DOCKER_IMAGE:${BUILD_NUMBER} \
+                        docker compose ps
+
+                    APP_IMAGE=$DOCKER_IMAGE:${BUILD_NUMBER} \
+                        docker compose logs app
 
                     exit 1
                 '''
@@ -110,44 +118,79 @@ pipeline {
     post {
 
         success {
-            echo "Build ${BUILD_NUMBER} deployed successfully"
+            echo "Pipeline SUCCESS - Build ${BUILD_NUMBER} is running"
         }
 
         failure {
-
             script {
 
-                int previousBuild =
-                    env.BUILD_NUMBER.toInteger() - 1
+                int previousBuild = env.BUILD_NUMBER.toInteger() - 1
 
-                echo "Deployment failed"
-                echo "Rolling back to build ${previousBuild}"
+                echo "Pipeline failed"
+                echo "Attempting rollback to build ${previousBuild}"
 
                 if (previousBuild > 0) {
 
                     sh """
-                        echo "Pulling previous image..."
+                        echo "---------------------------------------"
+                        echo "ROLLBACK STARTED"
+                        echo "Current failed build: ${BUILD_NUMBER}"
+                        echo "Rollback target: ${previousBuild}"
+                        echo "---------------------------------------"
+
+                        echo "Pulling previous Docker image..."
 
                         docker pull \
                             ${DOCKER_IMAGE}:${previousBuild}
 
-                        docker compose down
+                        echo "Stopping failed deployment..."
 
-                        echo "Deploying previous version..."
+                        APP_IMAGE=${DOCKER_IMAGE}:${BUILD_NUMBER} \
+                            docker compose down
+
+                        echo "Starting previous working build..."
 
                         APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
                             docker compose up -d
 
-                        echo "Waiting for rollback deployment..."
+                        echo "Waiting for rollback application..."
 
-                        sleep 10
+                        for i in \$(seq 1 12); do
 
-                        docker compose ps
+                            if curl --fail --silent \
+                                http://localhost:8081/actuator/health \
+                                | grep -q '"status":"UP"'; then
+
+                                echo "---------------------------------------"
+                                echo "ROLLBACK SUCCESSFUL"
+                                echo "Running build: ${previousBuild}"
+                                echo "---------------------------------------"
+
+                                APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
+                                    docker compose ps
+
+                                exit 0
+                            fi
+
+                            echo "Rollback application not ready. Attempt \$i/12"
+                            sleep 5
+                        done
+
+                        echo "---------------------------------------"
+                        echo "ROLLBACK FAILED"
+                        echo "---------------------------------------"
+
+                        APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
+                            docker compose ps
+
+                        APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
+                            docker compose logs app
+
+                        exit 1
                     """
 
                 } else {
-
-                    echo "No previous build available for rollback"
+                    echo "No previous build is available for rollback"
                 }
             }
         }
