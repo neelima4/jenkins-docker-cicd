@@ -52,39 +52,51 @@ pipeline {
             }
         }
 
-        stage('Deploy with Docker Compose') {
+        stage('Deploy New Version') {
             steps {
                 sh '''
-                    docker compose pull
+                    echo "Deploying version ${BUILD_NUMBER}"
+
+                    APP_IMAGE=$DOCKER_IMAGE:${BUILD_NUMBER} \
+                        docker compose pull app
+
                     docker compose down
-                    docker compose up -d
+
+                    APP_IMAGE=$DOCKER_IMAGE:${BUILD_NUMBER} \
+                        docker compose up -d
                 '''
             }
         }
 
         stage('Verify Deployment') {
- 	 steps {
-        	sh '''
-            echo "Waiting for application to start..."
+            steps {
+                sh '''
+                    echo "Waiting for application..."
 
-            for i in $(seq 1 12); do
-                if curl --fail --silent http://localhost:8081 > /dev/null; then
-                    echo "Application is healthy"
-                    curl http://localhost:8081
-                    exit 0
-                fi
+                    for i in $(seq 1 12); do
 
-                echo "Application not ready yet. Attempt $i/12"
-                sleep 5
-            done
+                        if curl --fail --silent \
+                            http://localhost:8081/actuator/health \
+                            | grep -q '"status":"UP"'; then
 
-            echo "Application failed to become ready"
-            docker compose ps
-            docker compose logs app
-            exit 1
-        '''
-    }
-}
+                            echo "Application is healthy"
+                            curl http://localhost:8081/actuator/health
+                            exit 0
+                        fi
+
+                        echo "Application not ready. Attempt $i/12"
+                        sleep 5
+                    done
+
+                    echo "Deployment failed health check"
+
+                    docker compose ps
+                    docker compose logs app
+
+                    exit 1
+                '''
+            }
+        }
 
         stage('Cleanup') {
             steps {
@@ -96,12 +108,48 @@ pipeline {
     }
 
     post {
+
         success {
-            echo 'CI/CD pipeline completed successfully'
+            echo "Build ${BUILD_NUMBER} deployed successfully"
         }
 
         failure {
-            echo 'CI/CD pipeline failed'
+
+            script {
+
+                int previousBuild =
+                    env.BUILD_NUMBER.toInteger() - 1
+
+                echo "Deployment failed"
+                echo "Rolling back to build ${previousBuild}"
+
+                if (previousBuild > 0) {
+
+                    sh """
+                        echo "Pulling previous image..."
+
+                        docker pull \
+                            ${DOCKER_IMAGE}:${previousBuild}
+
+                        docker compose down
+
+                        echo "Deploying previous version..."
+
+                        APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
+                            docker compose up -d
+
+                        echo "Waiting for rollback deployment..."
+
+                        sleep 10
+
+                        docker compose ps
+                    """
+
+                } else {
+
+                    echo "No previous build available for rollback"
+                }
+            }
         }
     }
 }
