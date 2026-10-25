@@ -72,7 +72,7 @@ pipeline {
         stage('Verify Deployment') {
             steps {
                 sh '''
-                    echo "Waiting for application health check..."
+                    echo "Checking application health..."
 
                     for i in $(seq 1 12); do
 
@@ -96,10 +96,10 @@ pipeline {
                     echo "Deployment failed health check"
 
                     APP_IMAGE=$DOCKER_IMAGE:${BUILD_NUMBER} \
-                        docker compose ps
+                        docker compose ps || true
 
                     APP_IMAGE=$DOCKER_IMAGE:${BUILD_NUMBER} \
-                        docker compose logs app
+                        docker compose logs app || true
 
                     exit 1
                 '''
@@ -118,79 +118,182 @@ pipeline {
     post {
 
         success {
-            echo "Pipeline SUCCESS - Build ${BUILD_NUMBER} is running"
+            echo "======================================"
+            echo "PIPELINE SUCCESS"
+            echo "Build ${BUILD_NUMBER} is running"
+            echo "======================================"
         }
 
         failure {
+
             script {
 
                 int previousBuild = env.BUILD_NUMBER.toInteger() - 1
 
-                echo "Pipeline failed"
-                echo "Attempting rollback to build ${previousBuild}"
+                echo "======================================"
+                echo "DEPLOYMENT FAILED"
+                echo "Failed build: ${BUILD_NUMBER}"
+                echo "Rollback target: ${previousBuild}"
+                echo "======================================"
 
-                if (previousBuild > 0) {
+                if (previousBuild <= 0) {
+                    echo "No previous build available for rollback"
+                    return
+                }
 
-                    sh """
-                        echo "---------------------------------------"
-                        echo "ROLLBACK STARTED"
-                        echo "Current failed build: ${BUILD_NUMBER}"
-                        echo "Rollback target: ${previousBuild}"
-                        echo "---------------------------------------"
+                /*
+                 * Step 1:
+                 * Check whether previous Docker image exists.
+                 */
+                int pullResult = sh(
+                    script: """
+                        echo "Pulling previous image..."
+                        docker pull ${DOCKER_IMAGE}:${previousBuild}
+                    """,
+                    returnStatus: true
+                )
 
-                        echo "Pulling previous Docker image..."
+                if (pullResult != 0) {
+                    echo "======================================"
+                    echo "ROLLBACK CANNOT START"
+                    echo "Image ${DOCKER_IMAGE}:${previousBuild} was not found"
+                    echo "======================================"
+                    return
+                }
 
-                        docker pull \
-                            ${DOCKER_IMAGE}:${previousBuild}
+                echo "Previous Docker image found"
 
+                /*
+                 * Step 2:
+                 * Stop failed deployment.
+                 */
+                sh(
+                    script: """
                         echo "Stopping failed deployment..."
 
                         APP_IMAGE=${DOCKER_IMAGE}:${BUILD_NUMBER} \
                             docker compose down
+                    """,
+                    returnStatus: true
+                )
 
-                        echo "Starting previous working build..."
+                /*
+                 * Step 3:
+                 * Deploy previous Docker image.
+                 */
+                int rollbackStart = sh(
+                    script: """
+                        echo "Starting rollback build ${previousBuild}..."
 
                         APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
                             docker compose up -d
+                    """,
+                    returnStatus: true
+                )
 
-                        echo "Waiting for rollback application..."
+                if (rollbackStart != 0) {
 
+                    echo "======================================"
+                    echo "ROLLBACK CONTAINER START FAILED"
+                    echo "======================================"
+
+                    sh(
+                        script: """
+                            APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
+                                docker compose ps
+                        """,
+                        returnStatus: true
+                    )
+
+                    sh(
+                        script: """
+                            APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
+                                docker compose logs app
+                        """,
+                        returnStatus: true
+                    )
+
+                    return
+                }
+
+                /*
+                 * Step 4:
+                 * Verify rollback health.
+                 */
+                echo "Rollback containers started"
+                echo "Waiting for rollback application..."
+
+                int healthResult = sh(
+                    script: """
                         for i in \$(seq 1 12); do
 
                             if curl --fail --silent \
                                 http://localhost:8081/actuator/health \
                                 | grep -q '"status":"UP"'; then
 
-                                echo "---------------------------------------"
-                                echo "ROLLBACK SUCCESSFUL"
-                                echo "Running build: ${previousBuild}"
-                                echo "---------------------------------------"
-
-                                APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
-                                    docker compose ps
-
+                                echo "Rollback application is healthy"
                                 exit 0
                             fi
 
-                            echo "Rollback application not ready. Attempt \$i/12"
+                            echo "Rollback health check attempt \$i/12"
                             sleep 5
                         done
 
-                        echo "---------------------------------------"
-                        echo "ROLLBACK FAILED"
-                        echo "---------------------------------------"
-
-                        APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
-                            docker compose ps
-
-                        APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
-                            docker compose logs app
-
                         exit 1
-                    """
+                    """,
+                    returnStatus: true
+                )
+
+                /*
+                 * Step 5:
+                 * Report rollback result.
+                 */
+                if (healthResult == 0) {
+
+                    echo "======================================"
+                    echo "ROLLBACK SUCCESSFUL"
+                    echo "Running build: ${previousBuild}"
+                    echo "======================================"
+
+                    sh(
+                        script: """
+                            APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
+                                docker compose ps
+                        """,
+                        returnStatus: true
+                    )
+
+                    sh(
+                        script: """
+                            docker inspect \
+                                jenkins-docker-cicd-app-1 \
+                                --format='{{.Config.Image}}'
+                        """,
+                        returnStatus: true
+                    )
 
                 } else {
-                    echo "No previous build is available for rollback"
+
+                    echo "======================================"
+                    echo "ROLLBACK FAILED"
+                    echo "Build ${previousBuild} is not healthy"
+                    echo "======================================"
+
+                    sh(
+                        script: """
+                            APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
+                                docker compose ps
+                        """,
+                        returnStatus: true
+                    )
+
+                    sh(
+                        script: """
+                            APP_IMAGE=${DOCKER_IMAGE}:${previousBuild} \
+                                docker compose logs app
+                        """,
+                        returnStatus: true
+                    )
                 }
             }
         }
