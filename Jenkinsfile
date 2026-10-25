@@ -128,7 +128,7 @@ pipeline {
 
             script {
 
-                int previousBuild = env.BUILD_NUMBER.toInteger() - 1
+                int previousBuild = 2
 
                 echo "======================================"
                 echo "DEPLOYMENT FAILED"
